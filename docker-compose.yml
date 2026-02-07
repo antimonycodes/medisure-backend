@@ -1,0 +1,10 @@
+services:
+  backend:
+    build: .
+    container_name: medisure_backend
+    volumes:
+      # Tyour SQLite DB on the 50GB disk
+      - /data/projects/medisure_db:/app/db_data
+    ports:
+      - "8000:8000"
+    restart: always
