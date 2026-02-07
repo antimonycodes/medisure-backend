@@ -12,7 +12,7 @@ services:
     volumes:
       - /data/projects/medisure_db:/app/db_data
     ports:
-      - "8000:8000"
+      - "8001:8000"
     environment:
       - DEBUG=False
       - PYTHONUNBUFFERED=1
