@@ -99,7 +99,7 @@ REST_FRAMEWORK = {
 }
 
 BLOCKFROST_PROJECT_ID = os.getenv('BLOCKFROST_PROJECT_ID', '')
-BLOCKFROST_NETWORK = 'testnet'
+BLOCKFROST_NETWORK = 'preprod'
 
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'

@@ -20,6 +20,8 @@ urlpatterns = [
     path('auth/signup/', signup, name='signup'),
     path('auth/signin/', signin, name='signin'),
     path('dashboard/', views.dashboard_stats, name='dashboard-stats'),
+    path('pharmacy/dashboard/', views.pharmacy_dashboard_stats, name='pharmacy-dashboard-stats'),
+    path('pharmacy/receive/', views.receive_batch, name='pharmacy-receive-batch'),
     path('pharmacy/<str:pharmacy_id>/inventory/', views.pharmacy_inventory, name='pharmacy-inventory'),
     path('cart/', views.get_cart, name='get-cart'),
     path('cart/add/', views.add_to_cart, name='add-to-cart'),
@@ -32,4 +34,5 @@ urlpatterns = [
     path('orders/<str:order_id>/status/', views.update_order_status, name='update-order-status'),
     path('users/<int:user_id>/', views.get_user, name='get-user'),
     path('users/', views.list_users_by_role, name='list-users'),
+    path('marketplace/', views.list_marketplace_drugs, name='marketplace'),
 ]

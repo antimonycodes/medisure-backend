@@ -35,6 +35,8 @@ class PharmacyInventorySerializer(serializers.ModelSerializer):
     medicine_name = serializers.CharField(source='batch.medicine_name', read_only=True)
     batch_id = serializers.CharField(source='batch.batch_id', read_only=True)
     
+    batch_details = BatchSerializer(source='batch', read_only=True)
+    
     class Meta:
         model = PharmacyInventory
         fields = '__all__'
@@ -44,6 +46,7 @@ class CartItemSerializer(serializers.ModelSerializer):
     price_per_unit = serializers.DecimalField(source='inventory_item.price_per_unit', max_digits=10, decimal_places=2, read_only=True)
     subtotal = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     pharmacy_name = serializers.CharField(source='inventory_item.pharmacy.name', read_only=True)
+    pharmacy_id = serializers.UUIDField(source='inventory_item.pharmacy.id', read_only=True)
     
     class Meta:
         model = CartItem

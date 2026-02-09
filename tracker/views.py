@@ -48,11 +48,32 @@ def mint_batch(request):
         batch_data = request.data
         qr_code = str(uuid.uuid4())
         
+        # Validate manufacturer existence
+        manufacturer_id = batch_data.get('manufacturer_id')
+        if not manufacturer_id:
+            return Response({
+                'success': False,
+                'error': 'manufacturer_id is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            manufacturer = Manufacturer.objects.get(id=manufacturer_id)
+        except Manufacturer.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': f'Manufacturer with ID {manufacturer_id} does not exist. Please ensure your profile is fully set up.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({
+                'success': False,
+                'error': f'Invalid manufacturer_id format: {str(e)}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
         batch = Batch.objects.create(
             batch_id=batch_data['batch_id'],
             medicine_name=batch_data['medicine_name'],
             composition=batch_data['composition'],
-            manufacturer_id=batch_data['manufacturer_id'],
+            manufacturer=manufacturer,
             manufactured_date=batch_data['manufactured_date'],
             expiry_date=batch_data['expiry_date'],
             quantity=batch_data['quantity'],
@@ -157,23 +178,44 @@ def track_journey(request, batch_id):
 @api_view(['POST'])
 def transfer_batch(request):
     try:
-        from .blockfrost_utils import verify_wallet_has_asset
+        from .blockfrost_utils import verify_wallet_has_asset, get_address_info, get_blockfrost_api
         
         transfer_data = request.data
+        to_wallet = transfer_data.get('to_wallet')
         batch = Batch.objects.get(batch_id=transfer_data['batch_id'])
         
-        if batch.policy_id and batch.asset_name:
-            verification = verify_wallet_has_asset(
-                transfer_data['to_wallet'],
-                batch.policy_id,
-                batch.asset_name
-            )
+        # Sync identifiers if provided by frontend
+        updated_policy = transfer_data.get('policy_id')
+        updated_asset = transfer_data.get('asset_name')
+        if updated_policy: batch.policy_id = updated_policy
+        if updated_asset: batch.asset_name = updated_asset
+        if updated_policy or updated_asset: batch.save()
+            
+        policy_to_verify = batch.policy_id
+        asset_to_verify = batch.asset_name
+        
+        if policy_to_verify and asset_to_verify:
+            verification = verify_wallet_has_asset(to_wallet, policy_to_verify, asset_to_verify)
+            
+            # If standard check fails, try Stake Address match (handles HD wallet internal addresses)
+            if not verification.get('has_asset'):
+                target_info = get_address_info(to_wallet)
+                target_stake = target_info['data'].stake_address if target_info['success'] else None
+                
+                api = get_blockfrost_api()
+                holders = api.asset_addresses(f"{policy_to_verify}{asset_to_verify}")
+                if not isinstance(holders, list): holders = [holders] if hasattr(holders, 'address') else []
+
+                for holder_item in holders:
+                    holder_info = get_address_info(holder_item.address)
+                    holder_stake = holder_info['data'].stake_address if holder_info['success'] else None
+                    
+                    if target_stake and target_stake == holder_stake:
+                        verification = {'success': True, 'has_asset': True, 'quantity': holder_item.quantity}
+                        break
             
             if not verification.get('success') or not verification.get('has_asset'):
-                return Response({
-                    'success': False,
-                    'error': 'Asset not found in receiving wallet'
-                }, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'success': False, 'error': 'Asset not found in receiving wallet'}, status=status.HTTP_400_BAD_REQUEST)
         
         Transaction.objects.create(
             batch=batch,
@@ -201,6 +243,117 @@ def transfer_batch(request):
         }, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(['GET'])
+def pharmacy_dashboard_stats(request):
+    try:
+        wallet_address = request.query_params.get('wallet_address')
+        if not wallet_address:
+            return Response({'error': 'wallet_address required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # 1. Get Inventory
+        try:
+            pharmacy = Pharmacy.objects.get(wallet_address=wallet_address)
+            inventory = PharmacyInventory.objects.filter(pharmacy=pharmacy)
+            inventory_data = PharmacyInventorySerializer(inventory, many=True).data
+        except Pharmacy.DoesNotExist:
+            inventory_data = []
+            pharmacy = None
+
+        # 2. Get Incoming Transfers
+        # Any 'TRANSFER' transaction where to_wallet matches, 
+        # but the batch is NOT in the pharmacy's inventory yet.
+        incoming_txs = Transaction.objects.filter(
+            to_wallet=wallet_address,
+            transaction_type='TRANSFER'
+        ).select_related('batch')
+        
+        incoming_batches = []
+        already_in_inventory = set(PharmacyInventory.objects.filter(pharmacy=pharmacy).values_list('batch_id', flat=True)) if pharmacy else set()
+
+        for tx in incoming_txs:
+            if tx.batch.id not in already_in_inventory:
+                # Avoid duplicates if multiple transfers happened (take latest)
+                if not any(b['id'] == str(tx.batch.id) for b in incoming_batches):
+                    incoming_batches.append({
+                        'id': str(tx.batch.id),
+                        'batch_id': tx.batch.batch_id,
+                        'medicine_name': tx.batch.medicine_name,
+                        'composition': tx.batch.composition,
+                        'expiry_date': tx.batch.expiry_date,
+                        'from_wallet': tx.from_wallet,
+                        'timestamp': tx.timestamp
+                    })
+
+        return Response({
+            'success': True,
+            'total_inventory': len(inventory_data),
+            'pending_transfers': len(incoming_batches),
+            'inventory': inventory_data,
+            'incoming': incoming_batches
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST'])
+def receive_batch(request):
+    try:
+        from .blockfrost_utils import verify_wallet_has_asset
+        
+        data = request.data
+        batch_id = data.get('batch_id')
+        wallet_address = data.get('wallet_address')
+        price = data.get('price_per_unit')
+        
+        if not all([batch_id, wallet_address, price]):
+            return Response({'error': 'batch_id, wallet_address, and price_per_unit are required'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        batch = Batch.objects.get(id=batch_id)
+        
+        # 1. Verify on blockchain
+        verification = verify_wallet_has_asset(wallet_address, batch.policy_id, batch.asset_name)
+        if not verification.get('has_asset'):
+            return Response({'error': 'Asset not verified in your wallet on-chain'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        # 2. Get or create Pharmacy
+        pharmacy, created = Pharmacy.objects.get_or_create(
+            wallet_address=wallet_address,
+            defaults={'name': f"Pharmacy ({wallet_address[:8]}...)"}
+        )
+        
+        # 3. Add to inventory
+        inventory, created = PharmacyInventory.objects.update_or_create(
+            pharmacy=pharmacy,
+            batch=batch,
+            defaults={
+                'quantity_available': int(verification.get('quantity', 1)),
+                'price_per_unit': price,
+                'in_stock': True
+            }
+        )
+        
+        # 4. Record RECEIVED transaction
+        Transaction.objects.get_or_create(
+            batch=batch,
+            transaction_type='RECEIVED',
+            defaults={
+                'from_wallet': 'Unknown', 
+                'to_wallet': wallet_address,
+                'tx_hash': f"REC-{uuid.uuid4().hex[:16]}"
+            }
+        )
+        
+        return Response({
+            'success': True,
+            'message': 'Batch received and added to inventory',
+            'inventory_id': str(inventory.id)
+        }, status=status.HTTP_201_CREATED)
+        
+    except Batch.DoesNotExist:
+        return Response({'error': 'Batch not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET'])
 def dashboard_stats(request):
     try:
         manufacturer_id = request.query_params.get('manufacturer_id')
@@ -221,8 +374,13 @@ def dashboard_stats(request):
         
         for batch in manufacturer_batches:
             if batch.nft_minted:
-                transfers = Transaction.objects.filter(batch=batch, transaction_type='TRANSFER').count()
-                status_text = "In Transit" if transfers > 0 else "Minted"
+                # Check for receipt first
+                received = Transaction.objects.filter(batch=batch, transaction_type='RECEIVED').exists()
+                if received:
+                    status_text = "Delivered"
+                else:
+                    transfers = Transaction.objects.filter(batch=batch, transaction_type='TRANSFER').count()
+                    status_text = "In Transit" if transfers > 0 else "Minted"
             else:
                 status_text = "Pending"
             
@@ -231,7 +389,9 @@ def dashboard_stats(request):
                 'medicine_name': batch.medicine_name,
                 'composition': batch.composition,
                 'expiry_date': batch.expiry_date,
-                'status': status_text
+                'status': status_text,
+                'policy_id': batch.policy_id,
+                'asset_name': batch.asset_name
             })
         
         return Response({
@@ -370,6 +530,10 @@ def create_order(request):
         if not cart.items.exists():
             return Response({'error': 'Cart is empty'}, status=status.HTTP_400_BAD_REQUEST)
         
+        # Verify all items belong to the same pharmacy if needed, 
+        # or filter cart items by pharmacy_id
+        pharmacy = Pharmacy.objects.get(id=pharmacy_id)
+        
         order = Order.objects.create(
             user_id=user_id,
             pharmacy_id=pharmacy_id,
@@ -383,6 +547,15 @@ def create_order(request):
                 quantity=cart_item.quantity,
                 price_per_unit=cart_item.inventory_item.price_per_unit,
                 subtotal=cart_item.subtotal
+            )
+            
+            # Record SOLD transaction for journey history
+            Transaction.objects.create(
+                batch=cart_item.inventory_item.batch,
+                transaction_type='SOLD',
+                from_wallet=pharmacy.wallet_address,
+                to_wallet=f"Patient-{user_id}",
+                tx_hash=f"SALE-{uuid.uuid4().hex[:16]}"
             )
             
             inventory = cart_item.inventory_item
@@ -399,6 +572,8 @@ def create_order(request):
             'message': 'Order created successfully'
         }, status=status.HTTP_201_CREATED)
         
+    except Pharmacy.DoesNotExist:
+        return Response({'error': 'Pharmacy not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -466,6 +641,18 @@ def get_user(request, user_id):
         
     except User.DoesNotExist:
         return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['GET'])
+def list_marketplace_drugs(request):
+    try:
+        inventory = PharmacyInventory.objects.filter(in_stock=True, quantity_available__gt=0)
+        serializer = PharmacyInventorySerializer(inventory, many=True)
+        return Response({
+            'success': True,
+            'drugs': serializer.data
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(['GET'])
 def list_users_by_role(request):

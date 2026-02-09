@@ -22,7 +22,11 @@ def signup(request):
             return Response({'error': 'Username already exists'}, status=status.HTTP_400_BAD_REQUEST)
         
         user = User.objects.create_user(username=username, password=password, email=email)
-        user.profile.role = role
+        
+        # Signal should create profile, but double check
+        from tracker.models import UserProfile
+        profile, created = UserProfile.objects.get_or_create(user=user)
+        profile.role = role
         
         entity_id = None
         if role == 'manufacturer':
@@ -47,8 +51,8 @@ def signup(request):
             )
             entity_id = str(entity.id)
         
-        user.profile.entity_id = entity_id
-        user.profile.save()
+        profile.entity_id = entity_id
+        profile.save()
         
         token, created = Token.objects.get_or_create(user=user)
         
@@ -58,7 +62,8 @@ def signup(request):
             'user_id': user.id,
             'username': user.username,
             'role': role,
-            'entity_id': entity_id
+            'entity_id': entity_id,
+            'name': name
         }, status=status.HTTP_201_CREATED)
         
     except Exception as e:
@@ -75,16 +80,36 @@ def signin(request):
         
         if user:
             token, created = Token.objects.get_or_create(user=user)
-            role = user.profile.role
-            entity_id = user.profile.entity_id
             
+            from tracker.models import UserProfile
+            profile, created = UserProfile.objects.get_or_create(user=user)
+            role = profile.role
+            entity_id = profile.entity_id
+            
+            # Fetch entity name
+            name = user.username
+            if entity_id:
+                if role == 'manufacturer':
+                    try:
+                        name = Manufacturer.objects.get(id=entity_id).name
+                    except: pass
+                elif role == 'pharmacy':
+                    try:
+                        name = Pharmacy.objects.get(id=entity_id).name
+                    except: pass
+                elif role == 'distributor':
+                    try:
+                        name = Distributor.objects.get(id=entity_id).name
+                    except: pass
+
             return Response({
                 'success': True,
                 'token': token.key,
                 'user_id': user.id,
                 'username': user.username,
                 'role': role,
-                'entity_id': entity_id
+                'entity_id': entity_id,
+                'name': name
             }, status=status.HTTP_200_OK)
         else:
             return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
