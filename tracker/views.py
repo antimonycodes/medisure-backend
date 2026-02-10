@@ -39,7 +39,7 @@ class TransactionViewSet(viewsets.ModelViewSet):
     serializer_class = TransactionSerializer
 
 class PharmacyInventoryViewSet(viewsets.ModelViewSet):
-    queryset = PharmacyInventory.objects.all()
+    queryset = PharmacyInventory.objects.all().order_by('batch__batch_id')
     serializer_class = PharmacyInventorySerializer
 
 @api_view(['POST'])
@@ -248,7 +248,9 @@ def dashboard_stats(request):
 @api_view(['GET'])
 def pharmacy_inventory(request, pharmacy_id):
     try:
-        inventory = PharmacyInventory.objects.filter(pharmacy_id=pharmacy_id, in_stock=True)
+        inventory = PharmacyInventory.objects.filter(
+            pharmacy_id=pharmacy_id, in_stock=True
+        ).order_by('batch__batch_id')
         serializer = PharmacyInventorySerializer(inventory, many=True)
         
         return Response({

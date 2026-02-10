@@ -68,10 +68,33 @@ def signup(request):
 @permission_classes([AllowAny])
 def signin(request):
     try:
-        username = request.data.get('username')
-        password = request.data.get('password')
-        
-        user = authenticate(username=username, password=password)
+        identifier = (request.data.get('username') or '').strip()
+        password = request.data.get('password') or ''
+
+        if not identifier or not password:
+            return Response(
+                {'error': 'Username/email and password are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 1) Direct username auth
+        user = authenticate(username=identifier, password=password)
+
+        # 2) Case-insensitive username fallback
+        if not user:
+            try:
+                matched_user = User.objects.get(username__iexact=identifier)
+                user = authenticate(username=matched_user.username, password=password)
+            except User.DoesNotExist:
+                pass
+
+        # 3) Email login fallback
+        if not user:
+            try:
+                matched_user = User.objects.get(email__iexact=identifier)
+                user = authenticate(username=matched_user.username, password=password)
+            except User.DoesNotExist:
+                pass
         
         if user:
             token, created = Token.objects.get_or_create(user=user)
